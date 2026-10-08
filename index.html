@@ -275,23 +275,20 @@ setTimeout(function(){(function(d,w,k,o,g) {var n=d.getElementsByTagName(o)[0],s
   }
 
   function sendRsvp(form) {
+    if (form.dataset.rsvpPending === 'true') return;
     var name = form.querySelector('[name="Ваше имя и фамилия"]');
     var attendance = form.querySelector('[name="Сможете ли присутствовать на нашем торжестве?"]:checked');
     var error = form.querySelector('.js-errorbox-all');
+    if (error) error.style.display = 'none';
     if (!name || !name.value.trim() || !attendance) {
-      if (error) {
-        error.style.display = 'block';
-        error.querySelector('.js-rule-error-req').textContent = 'Заполните имя и выберите вариант присутствия.';
-      }
+      showRsvpStatus(form, 'Заполните имя и выберите вариант присутствия.', false);
       return;
     }
     if (!wedding.rsvpEndpoint) {
-      if (error) {
-        error.style.display = 'block';
-        error.querySelector('.js-rule-error-req').textContent = 'RSVP временно настраивается. Пожалуйста, свяжитесь с организаторами.';
-      }
+      showRsvpStatus(form, 'RSVP временно настраивается. Пожалуйста, свяжитесь с организаторами.', false);
       return;
     }
+    form.dataset.rsvpPending = 'true';
     buttonState(form, true);
     showRsvpStatus(form, 'Отправляем ваш ответ…', false);
     postRsvpToScript({
@@ -300,16 +297,14 @@ setTimeout(function(){(function(d,w,k,o,g) {var n=d.getElementsByTagName(o)[0],s
       weddingDate: wedding.date,
       venue: wedding.venue
     }, function () {
+      form.dataset.rsvpPending = 'false';
       showRsvpStatus(form, 'Спасибо! Ваш ответ отправлен.', true);
     }, function (message) {
+      form.dataset.rsvpPending = 'false';
       buttonState(form, false);
-      if (error) {
-        error.style.display = 'block';
-        error.querySelector('.js-rule-error-req').textContent = message || 'Не удалось отправить ответ. Попробуйте ещё раз.';
-      }
+      showRsvpStatus(form, message || 'Не удалось отправить ответ. Попробуйте ещё раз.', false);
     });
   }
-
   function postRsvpToScript(payload, success, failure) {
     var callback = 'weddingRsvp_' + Date.now() + '_' + Math.random().toString(36).slice(2);
     var script = document.createElement('script');
@@ -366,6 +361,8 @@ setTimeout(function(){(function(d,w,k,o,g) {var n=d.getElementsByTagName(o)[0],s
       if (submitArea) submitArea.parentNode.insertBefore(status, submitArea);
       else form.appendChild(status);
     }
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
     status.textContent = message;
     if (complete) {
       status.style.color = '#ece5cd';
