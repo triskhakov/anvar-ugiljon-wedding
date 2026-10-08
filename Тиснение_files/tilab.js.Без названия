@@ -1,0 +1,930 @@
+/*!
+ * TiLab.js v0.7.0
+ * (c) 2025 Daniel Abros
+ * Сайт → https://cdn.abros.dev/
+ * <script src="https://cdn.abros.dev/tilab/tilab.js"></script>
+ */
+
+(function (window) {
+  if (!window.TiLab) {
+    const Constants = {
+      VERSION: "0.7.0",
+      CDN: "https://cdn.abros.dev",
+      CONSOLE_TYPES: ["log", "info", "trace", "warn", "error"],
+    };
+
+    const now = () => Date.now();
+
+    /**
+     * @param {string} src
+     * @param {boolean} [async=true]
+     * @returns {Promise<string>}
+     */
+    function loadScript(src, async = true) {
+      return new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = src;
+        script.async = async;
+        script.onload = () => {
+          resolve(src);
+        };
+        script.onerror = () => {
+          reject(new Error(`Не удалось загрузить скрипт: ${src}`));
+        };
+        document.head.appendChild(script);
+      });
+    }
+
+    /**
+     * @typedef {Object} TiLabConsoleEntry
+     * @property {number} id
+     * @property {string} time
+     * @property {string} type
+     * @property {string} name
+     * @property {string} message
+     * @property {*} [data]
+     */
+
+    const ConsoleModule = () => {
+      /** @type {TiLabConsoleEntry[]} */
+      const storage = [];
+      /** @type {Set<() => void>} */
+      const listeners = new Set();
+
+      const notify = () => {
+        listeners.forEach((fn) => {
+          try {
+            fn();
+          } catch (_) {}
+        });
+      };
+
+      const addEntry = (type, name, message, data) => {
+        const entry = {
+          id: now() + Math.random(),
+          time: new Date().toLocaleString(),
+          type: type || "info",
+          name: name || "Система",
+          message: message || "",
+          data,
+        };
+        storage.push(entry);
+        notify();
+        return entry;
+      };
+
+      /**
+       * @param {() => void} fn
+       * @returns {() => void} unsubscribe
+       */
+      const subscribe = (fn) => {
+        if (typeof fn !== "function") return () => {};
+        listeners.add(fn);
+        return () => {
+          listeners.delete(fn);
+        };
+      };
+
+      const consoleApi = {
+        storage,
+        /**
+         * @returns {void}
+         */
+        clear: () => {
+          storage.length = 0;
+          notify();
+        },
+        subscribe,
+      };
+
+      Constants.CONSOLE_TYPES.forEach((type) => {
+        /**
+         * @param {string} name
+         * @param {string} message
+         * @param {*} [data]
+         * @returns {TiLabConsoleEntry}
+         */
+        consoleApi[type] = (name, message, data) =>
+          addEntry(type, name, message, data);
+      });
+
+      return consoleApi;
+    };
+
+    /**
+     * @typedef {Object} TiLabLibRecord
+     * @property {string} name
+     * @property {{ name: string, desc: string }} meta
+     * @property {boolean} isLoaded
+     * @property {boolean} isLoading
+     * @property {number} timestamp
+     * @property {Record<string, *>} exports
+     * @property {string|null} error
+     * @property {number} [loadedAt]
+     * @property {Promise<Record<string, *>>} [promise]
+     */
+
+    const LibraryModule = () => {
+      /** @type {TiLabLibRecord[]} */
+      const storage = [];
+      /** @type {Set<() => void>} */
+      const listeners = new Set();
+      /** @type {Promise<void>} */
+      let exportQueue = Promise.resolve();
+
+      const notify = () => {
+        listeners.forEach((fn) => {
+          try {
+            fn();
+          } catch (_) {}
+        });
+      };
+
+      /**
+       * @param {() => void} fn
+       * @returns {() => void} unsubscribe
+       */
+      const subscribe = (fn) => {
+        if (typeof fn !== "function") return () => {};
+        listeners.add(fn);
+        return () => {
+          listeners.delete(fn);
+        };
+      };
+
+      /**
+       * Последовательная очередь для window.TiLabExport — без гонок при параллельных init разных libs.
+       * @param {TiLabLibRecord} libRecord
+       * @returns {Promise<void>}
+       */
+      const withExportSlot = (libRecord) => {
+        const run = () =>
+          new Promise((resolve, reject) => {
+            window.TiLabExport = (libData) => {
+              libRecord.meta = {
+                name: libData.name,
+                desc: libData.desc,
+              };
+              Object.assign(libRecord.exports, libData.exports || {});
+            };
+
+            loadScript(`${Constants.CDN}/tilab/libs/${libRecord.name}.js`)
+              .then(() => {
+                delete window.TiLabExport;
+                resolve();
+              })
+              .catch((error) => {
+                delete window.TiLabExport;
+                reject(error);
+              });
+          });
+
+        const job = exportQueue.then(run, run);
+        exportQueue = job.catch(() => {});
+        return job;
+      };
+
+      /**
+       * @param {string} libName
+       * @param {(exports: Record<string, *>) => void} [callback]
+       * @returns {Promise<Record<string, *>>}
+       */
+      const init = (libName, callback) => {
+        const existingLib = storage.find((lib) => lib.name === libName);
+
+        if (existingLib?.isLoaded) {
+          const exports = existingLib.exports || {};
+          if (typeof callback === "function") {
+            callback(exports);
+          }
+          return Promise.resolve(exports);
+        }
+
+        if (existingLib?.isLoading && existingLib.promise) {
+          return existingLib.promise.then((exports) => {
+            if (typeof callback === "function") {
+              callback(exports);
+            }
+            return exports;
+          });
+        }
+
+        const libRecord =
+          existingLib ||
+          (() => {
+            const record = {
+              name: libName,
+              meta: {
+                name: "",
+                desc: "",
+              },
+              isLoaded: false,
+              isLoading: true,
+              timestamp: now(),
+              exports: {},
+              error: null,
+            };
+            storage.push(record);
+            notify();
+            return record;
+          })();
+
+        libRecord.isLoading = true;
+        libRecord.isLoaded = false;
+        libRecord.error = null;
+        notify();
+
+        const promise = withExportSlot(libRecord)
+          .then(() => {
+            libRecord.isLoaded = true;
+            libRecord.isLoading = false;
+            libRecord.loadedAt = now();
+            libRecord.promise = undefined;
+            notify();
+
+            if (typeof callback === "function") {
+              callback(libRecord.exports);
+            }
+
+            return libRecord.exports;
+          })
+          .catch((error) => {
+            libRecord.isLoaded = false;
+            libRecord.isLoading = false;
+            libRecord.error = error.message;
+            libRecord.promise = undefined;
+            notify();
+
+            window.TiLab.console.error(
+              "TiLab",
+              `Ошибка загрузки библиотеки ${libName}:`,
+              error,
+            );
+            throw error;
+          });
+
+        libRecord.promise = promise;
+        return promise;
+      };
+
+      return {
+        storage,
+        init,
+        subscribe,
+      };
+    };
+
+    const JSXModule = (queryModule) => {
+      const storage = [];
+
+      const jsxWrapper = (callback) => {
+        return import(`${Constants.CDN}/tilab/services/preact.module.js`)
+          .then((module) => {
+            const {
+              html,
+              render,
+              Component,
+              h,
+              useState,
+              useEffect,
+              useRef,
+              useMemo,
+              useCallback,
+              useContext,
+              createContext,
+            } = module;
+
+            if (!html || !render) {
+              throw new Error("htm/preact не загружен или функции недоступны");
+            }
+
+            window.TiLab.jsx._hooks = {
+              useState,
+              useEffect,
+              useRef,
+              useMemo,
+              useCallback,
+              useContext,
+              createContext,
+            };
+
+            callback({
+              html,
+              render,
+              Component,
+              h,
+              useState,
+              useEffect,
+              useRef,
+              useMemo,
+              useCallback,
+              useContext,
+              createContext,
+              useQuery: queryModule?.useQuery,
+              useMutation: queryModule?.useMutation,
+              getQueryData: queryModule?.getQueryData,
+              setQueryData: queryModule?.setQueryData,
+              invalidateQueries: queryModule?.invalidateQueries,
+              removeQueries: queryModule?.removeQueries,
+            });
+
+            const componentRecord = {
+              id: now() + Math.random(),
+              name: callback.name || "Anonymous",
+              createdAt: now(),
+            };
+            storage.push(componentRecord);
+          })
+          .catch((error) => {
+            console.error("Ошибка загрузки Preact:", error);
+            throw error;
+          });
+      };
+
+      const jsx = {
+        storage,
+        create: jsxWrapper,
+      };
+
+      return jsx;
+    };
+
+    const QueryModule = () => {
+      const queries = new Map();
+      const subscribers = new Map();
+      let listenersAttached = false;
+
+      const defaultOptions = {
+        staleTime: 0,
+        cacheTime: 5 * 60 * 1000,
+        retry: 3,
+        retryDelay: (attempt) => Math.min(1000 * 2 ** (attempt - 1), 30000),
+        refetchOnWindowFocus: true,
+        refetchOnReconnect: true,
+      };
+
+      const createQueryKey = (key) => {
+        return typeof key === "string" ? key : JSON.stringify(key);
+      };
+
+      const delay = (ms) =>
+        new Promise((resolve) => {
+          setTimeout(resolve, ms);
+        });
+
+      const resolveOptions = (options) => ({
+        ...defaultOptions,
+        ...options,
+      });
+
+      const notifySubscribers = (queryKey) => {
+        const query = queries.get(queryKey);
+        const querySubscribers = subscribers.get(queryKey) || [];
+        querySubscribers.forEach((callback) => callback(query));
+      };
+
+      const ensureEntry = (queryKey) => {
+        if (!queries.has(queryKey)) {
+          queries.set(queryKey, {
+            data: undefined,
+            error: null,
+            status: "idle",
+            isLoading: false,
+            isFetching: false,
+            updatedAt: 0,
+            options: null,
+            queryFn: null,
+            fetchId: 0,
+            cacheTimeoutId: null,
+          });
+        }
+        return queries.get(queryKey);
+      };
+
+      const setQueryState = (queryKey, patch) => {
+        const current = ensureEntry(queryKey);
+        const next = { ...current, ...patch };
+        queries.set(queryKey, next);
+        notifySubscribers(queryKey);
+      };
+
+      /**
+       * @param {string|unknown[]} queryKey
+       * @param {*|((prev: *) => *)} updater
+       */
+      const setQueryData = (queryKey, updater) => {
+        const key = createQueryKey(queryKey);
+        const current = ensureEntry(key);
+        const nextData =
+          typeof updater === "function" ? updater(current.data) : updater;
+        setQueryState(key, {
+          data: nextData,
+          error: null,
+          status: "success",
+          isLoading: false,
+          isFetching: false,
+          updatedAt: now(),
+        });
+      };
+
+      /**
+       * @param {string|unknown[]} queryKey
+       * @returns {*}
+       */
+      const getQueryData = (queryKey) => {
+        return queries.get(createQueryKey(queryKey))?.data;
+      };
+
+      /**
+       * @param {string|unknown[]} [queryKey]
+       * @returns {Promise<void>}
+       */
+      const invalidateQueries = async (queryKey) => {
+        if (queryKey === undefined) {
+          const tasks = [];
+          for (const [key, entry] of queries) {
+            const active = (subscribers.get(key) || []).length > 0;
+            if (!active || !entry.options?.queryFn) continue;
+            tasks.push(fetchQuery(key, entry.options, true).catch(() => {}));
+          }
+          await Promise.all(tasks);
+          return;
+        }
+
+        const key = createQueryKey(queryKey);
+        const entry = queries.get(key);
+        if (!entry) return;
+
+        entry.updatedAt = 0;
+        notifySubscribers(key);
+
+        const active = (subscribers.get(key) || []).length > 0;
+        if (active && entry.options?.queryFn) {
+          await fetchQuery(key, entry.options, true).catch(() => {});
+        }
+      };
+
+      /**
+       * @param {string|unknown[]} [queryKey]
+       */
+      const removeQueries = (queryKey) => {
+        if (queryKey === undefined) {
+          for (const key of [...queries.keys()]) {
+            cancelCacheCleanup(key);
+            queries.delete(key);
+            notifySubscribers(key);
+          }
+          return;
+        }
+
+        const key = createQueryKey(queryKey);
+        cancelCacheCleanup(key);
+        queries.delete(key);
+        notifySubscribers(key);
+      };
+
+      const cancelCacheCleanup = (queryKey) => {
+        const entry = queries.get(queryKey);
+        if (entry?.cacheTimeoutId) {
+          clearTimeout(entry.cacheTimeoutId);
+          entry.cacheTimeoutId = null;
+        }
+      };
+
+      const scheduleCacheCleanup = (queryKey) => {
+        const entry = queries.get(queryKey);
+        if (!entry) return;
+
+        const cacheTime = entry.options?.cacheTime ?? defaultOptions.cacheTime;
+        if (cacheTime === Infinity) return;
+
+        cancelCacheCleanup(queryKey);
+        if (cacheTime <= 0) {
+          queries.delete(queryKey);
+          notifySubscribers(queryKey);
+          return;
+        }
+
+        entry.cacheTimeoutId = setTimeout(() => {
+          queries.delete(queryKey);
+          notifySubscribers(queryKey);
+        }, cacheTime);
+      };
+
+      const isStale = (entry, options) => {
+        const staleTime = options?.staleTime ?? defaultOptions.staleTime;
+        if (staleTime === Infinity) return false;
+        return now() - entry.updatedAt > staleTime;
+      };
+
+      const shouldRetry = (retry, attempt, error) => {
+        if (retry === false || retry === 0) return false;
+        if (typeof retry === "function") return retry(attempt, error);
+        if (typeof retry === "number") return attempt <= retry;
+        return attempt <= defaultOptions.retry;
+      };
+
+      const getRetryDelay = (retryDelay, attempt) => {
+        if (typeof retryDelay === "function") return retryDelay(attempt);
+        if (typeof retryDelay === "number") return retryDelay;
+        return defaultOptions.retryDelay(attempt);
+      };
+
+      const fetchQuery = async (queryKey, options, force = false) => {
+        const entry = ensureEntry(queryKey);
+        const mergedOptions = resolveOptions(options);
+        const fetchId = entry.fetchId + 1;
+
+        entry.options = mergedOptions;
+        entry.queryFn = options.queryFn;
+        entry.fetchId = fetchId;
+
+        const hasData = entry.data !== undefined;
+
+        if (!force && hasData && !isStale(entry, mergedOptions) && !entry.error)
+          return entry.data;
+
+        setQueryState(queryKey, {
+          isFetching: true,
+          isLoading: !hasData,
+          status: !hasData ? "loading" : entry.status,
+          error: null,
+        });
+
+        const run = async (attempt = 1) => {
+          try {
+            const data = await Promise.resolve(entry.queryFn());
+            if (queries.get(queryKey)?.fetchId !== fetchId) {
+              return data;
+            }
+            setQueryState(queryKey, {
+              data,
+              error: null,
+              status: "success",
+              isLoading: false,
+              isFetching: false,
+              updatedAt: now(),
+            });
+            return data;
+          } catch (error) {
+            if (queries.get(queryKey)?.fetchId !== fetchId) {
+              throw error;
+            }
+            if (shouldRetry(mergedOptions.retry, attempt, error)) {
+              const wait = getRetryDelay(mergedOptions.retryDelay, attempt);
+              await delay(wait);
+              return run(attempt + 1);
+            }
+            setQueryState(queryKey, {
+              error,
+              status: "error",
+              isLoading: false,
+              isFetching: false,
+              updatedAt: now(),
+            });
+            throw error;
+          }
+        };
+
+        return run();
+      };
+
+      const subscribe = (queryKey, callback) => {
+        if (!subscribers.has(queryKey)) {
+          subscribers.set(queryKey, []);
+        }
+        subscribers.get(queryKey).push(callback);
+
+        cancelCacheCleanup(queryKey);
+
+        const query = queries.get(queryKey);
+        if (query) {
+          callback(query);
+        }
+
+        return () => {
+          const querySubscribers = subscribers.get(queryKey) || [];
+          const index = querySubscribers.indexOf(callback);
+          if (index > -1) {
+            querySubscribers.splice(index, 1);
+          }
+          if (querySubscribers.length === 0) {
+            scheduleCacheCleanup(queryKey);
+          }
+        };
+      };
+
+      const refetchActiveQueries = (eventType) => {
+        for (const [key, entry] of queries) {
+          const active = (subscribers.get(key) || []).length > 0;
+          if (!active || entry.isFetching) continue;
+          if (entry.options?.enabled === false) continue;
+
+          if (
+            eventType === "focus" &&
+            entry.options?.refetchOnWindowFocus === false
+          ) {
+            continue;
+          }
+          if (
+            eventType === "reconnect" &&
+            entry.options?.refetchOnReconnect === false
+          ) {
+            continue;
+          }
+          fetchQuery(key, entry.options, true).catch(() => {});
+        }
+      };
+
+      const attachListeners = () => {
+        if (listenersAttached) return;
+        listenersAttached = true;
+
+        window.addEventListener("focus", () => {
+          refetchActiveQueries("focus");
+        });
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) refetchActiveQueries("focus");
+        });
+        window.addEventListener("online", () => {
+          refetchActiveQueries("reconnect");
+        });
+      };
+
+      const useQuery = (options) => {
+        const {
+          queryKey,
+          queryFn,
+          enabled = true,
+          staleTime,
+          cacheTime,
+          retry,
+          retryDelay,
+          refetchOnWindowFocus,
+          refetchOnReconnect,
+        } = options;
+
+        const { useState, useEffect, useRef } = window.TiLab.jsx._hooks || {};
+
+        if (!useState || !useEffect || !useRef) {
+          console.error(
+            "useQuery: хуки недоступны. Используйте внутри TiLab.jsx",
+          );
+          return { data: undefined, isLoading: false, error: null };
+        }
+
+        const [state, setState] = useState({
+          data: undefined,
+          isLoading: false,
+          error: null,
+          isSuccess: false,
+          isError: false,
+          isFetching: false,
+          status: "idle",
+        });
+
+        const fullQueryKey = createQueryKey(queryKey);
+        const queryFnRef = useRef(queryFn);
+
+        useEffect(() => {
+          queryFnRef.current = queryFn;
+        }, [queryFn]);
+
+        useEffect(() => {
+          attachListeners();
+
+          const mergedOptions = resolveOptions({
+            queryKey: fullQueryKey,
+            queryFn: () => queryFnRef.current(),
+            enabled,
+            staleTime,
+            cacheTime,
+            retry,
+            retryDelay,
+            refetchOnWindowFocus,
+            refetchOnReconnect,
+          });
+
+          const current = ensureEntry(fullQueryKey);
+          current.options = mergedOptions;
+          current.queryFn = mergedOptions.queryFn;
+
+          if (!enabled) {
+            setState({
+              data: current.data,
+              isLoading: false,
+              error: current.error,
+              isSuccess: current.status === "success",
+              isError: current.status === "error",
+              isFetching: false,
+              status: current.status,
+            });
+            return;
+          }
+
+          const unsubscribe = subscribe(fullQueryKey, (query) => {
+            if (!query) return;
+
+            setState({
+              data: query.data,
+              isLoading: query.isLoading,
+              error: query.error,
+              isSuccess: query.status === "success",
+              isError: query.status === "error",
+              isFetching: query.isFetching,
+              status: query.status,
+            });
+          });
+
+          if (
+            !current.isFetching &&
+            (current.data === undefined || isStale(current, mergedOptions))
+          ) {
+            fetchQuery(fullQueryKey, current.options).catch(() => {});
+          }
+
+          return unsubscribe;
+        }, [
+          fullQueryKey,
+          enabled,
+          staleTime,
+          cacheTime,
+          retry,
+          retryDelay,
+          refetchOnWindowFocus,
+          refetchOnReconnect,
+        ]);
+
+        return state;
+      };
+
+      const useMutation = (options) => {
+        const {
+          mutationFn,
+          onMutate,
+          onSuccess,
+          onError,
+          onSettled,
+          retry,
+          retryDelay,
+        } = options;
+
+        const { useState, useCallback } = window.TiLab.jsx._hooks || {};
+
+        if (!useState || !useCallback) {
+          console.error(
+            "useMutation: хуки недоступны. Используйте внутри TiLab.jsx",
+          );
+          return { mutate: () => {}, isLoading: false, error: null };
+        }
+
+        const [state, setState] = useState({
+          data: undefined,
+          isLoading: false,
+          error: null,
+          isSuccess: false,
+          isError: false,
+          status: "idle",
+        });
+
+        const mutate = useCallback(
+          async (variables) => {
+            setState((prev) => ({
+              ...prev,
+              isLoading: true,
+              isError: false,
+              error: null,
+              status: "loading",
+            }));
+
+            let context;
+            try {
+              if (onMutate) {
+                context = await Promise.resolve(
+                  onMutate(variables, {
+                    getQueryData: (key) => getQueryData(key),
+                    setQueryData: (key, updater) =>
+                      setQueryData(key, updater),
+                  }),
+                );
+                if (typeof context === "function") {
+                  context = { rollback: context };
+                }
+              }
+            } catch (error) {
+              setState({
+                data: undefined,
+                isLoading: false,
+                error,
+                isSuccess: false,
+                isError: true,
+                status: "error",
+              });
+              if (onError) onError(error, variables, context);
+              if (onSettled) onSettled(undefined, error, variables, context);
+              throw error;
+            }
+
+            const retryOption = retry ?? defaultOptions.retry;
+            const retryDelayOption = retryDelay ?? defaultOptions.retryDelay;
+
+            const run = async (attempt = 1) => {
+              try {
+                const data = await Promise.resolve(mutationFn(variables));
+                setState({
+                  data,
+                  isLoading: false,
+                  error: null,
+                  isSuccess: true,
+                  isError: false,
+                  status: "success",
+                });
+                if (onSuccess) onSuccess(data, variables, context);
+                if (onSettled) onSettled(data, null, variables, context);
+                return data;
+              } catch (error) {
+                if (shouldRetry(retryOption, attempt, error)) {
+                  const wait = getRetryDelay(retryDelayOption, attempt);
+                  await delay(wait);
+                  return run(attempt + 1);
+                }
+                if (context?.rollback) {
+                  context.rollback();
+                }
+                setState({
+                  data: undefined,
+                  isLoading: false,
+                  error,
+                  isSuccess: false,
+                  isError: true,
+                  status: "error",
+                });
+                if (onError) onError(error, variables, context);
+                if (onSettled) onSettled(undefined, error, variables, context);
+                throw error;
+              }
+            };
+
+            return run();
+          },
+          [
+            mutationFn,
+            onMutate,
+            onSuccess,
+            onError,
+            onSettled,
+            retry,
+            retryDelay,
+          ],
+        );
+
+        const reset = useCallback(() => {
+          setState({
+            data: undefined,
+            isLoading: false,
+            error: null,
+            isSuccess: false,
+            isError: false,
+            status: "idle",
+          });
+        }, []);
+
+        return { ...state, mutate, reset };
+      };
+
+      return {
+        useQuery,
+        useMutation,
+        getQueryData,
+        setQueryData,
+        invalidateQueries,
+        removeQueries,
+      };
+    };
+
+    const createTiLab = () => {
+      const query = QueryModule();
+      return {
+        version: Constants.VERSION,
+        copyright: "© 2025 Daniel Abros",
+        site: "https://abros.dev",
+        console: ConsoleModule(),
+        lib: LibraryModule(),
+        query: {
+          getQueryData: query.getQueryData,
+          setQueryData: query.setQueryData,
+          invalidateQueries: query.invalidateQueries,
+          removeQueries: query.removeQueries,
+        },
+        jsx: JSXModule(query).create,
+      };
+    };
+
+    window.TiLab = createTiLab();
+
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get("tilab") === "") {
+      loadScript(`${Constants.CDN}/tilab/services/panel.js`);
+    }
+  }
+})(window);
