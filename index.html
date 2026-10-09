@@ -307,38 +307,8 @@ setTimeout(function(){(function(d,w,k,o,g) {var n=d.getElementsByTagName(o)[0],s
   }
   function postRsvpToScript(payload, success, failure) {
     var callback = 'weddingRsvp_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-    var script = document.createElement('script');
-    var finished = false;
-    var timer = window.setTimeout(function () {
-      finish(false, 'Сервер не ответил. Проверьте подключение к интернету и повторите попытку.');
-    }, 15000);
-
-    function cleanup() {
-      window.clearTimeout(timer);
-      delete window[callback];
-      script.remove();
-    }
-
-    function finish(ok, value) {
-      if (finished) return;
-      finished = true;
-      cleanup();
-      if (ok) success();
-      else failure(value);
-    }
-
-    window[callback] = function (response) {
-      if (response && response.ok) finish(true);
-      else finish(false, response && response.error ? response.error : 'Сервис RSVP вернул ошибку.');
-    };
-    script.onload = function () {
-      window.setTimeout(function () {
-        if (!finished) finish(false, 'Сервер не подтвердил отправку ответа. Повторите попытку.');
-      }, 0);
-    };
-    script.onerror = function () {
-      finish(false, 'Не удалось подключиться к сервису RSVP.');
-    };
+    var controller = new AbortController();
+    var timer = window.setTimeout(function () { controller.abort(); }, 30000);
     var params = new URLSearchParams({
       callback: callback,
       guestName: payload.guestName,
@@ -347,8 +317,40 @@ setTimeout(function(){(function(d,w,k,o,g) {var n=d.getElementsByTagName(o)[0],s
       venue: payload.venue,
       website: ''
     });
-    script.src = wedding.rsvpEndpoint + '?' + params.toString();
-    document.head.appendChild(script);
+
+    // Anonymous requests must not depend on a guest's Google login cookies.
+    fetch(wedding.rsvpEndpoint + '?' + params.toString(), {
+      method: 'GET',
+      mode: 'cors',
+      credentials: 'omit',
+      redirect: 'follow',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      signal: controller.signal
+    }).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.text();
+    }).then(function (text) {
+      // Parse the existing Apps Script response as data, never execute it.
+      text = text.trim();
+      var prefix = callback + '(';
+      if (text.slice(0, prefix.length) !== prefix || text.slice(-2) !== ');') {
+        throw new Error('Unexpected RSVP response');
+      }
+      var result = JSON.parse(text.slice(prefix.length, -2));
+      if (!result || typeof result.ok !== 'boolean') {
+        throw new Error('Invalid RSVP response');
+      }
+      window.clearTimeout(timer);
+      if (result.ok === true) success();
+      else failure(result.error || 'Сервис RSVP вернул ошибку.');
+    }).catch(function (error) {
+      window.clearTimeout(timer);
+      console.error('RSVP request failed:', error);
+      failure(error.name === 'AbortError'
+        ? 'Сервер не подтвердил отправку за 30 секунд. Ответ мог быть получен. Проверьте связь перед повторной отправкой.'
+        : 'Не удалось получить подтверждение от сервиса RSVP. Проверьте подключение и повторите попытку позже.');
+    });
   }
 
   function showRsvpStatus(form, message, complete) {
