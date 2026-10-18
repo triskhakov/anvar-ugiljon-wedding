@@ -1,0 +1,16 @@
+@font-face {
+  font-family: "Wedding Great Vibes";
+  src: url("./fonts/GreatVibes-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+/* Keep every letter, including Ö, ğ and ı, in the same script face. */
+/* Tilda emits a competing rule later in the body; the extra ID wins the cascade. */
+#allrecords #rec2431195351 .tn-elem[data-elem-id="1785235123235000001"] .tn-atom {
+  font-family: "Wedding Great Vibes", "Segoe Script", cursive;
+  font-weight: 400;
+  font-style: normal;
+  font-synthesis: none;
+}
